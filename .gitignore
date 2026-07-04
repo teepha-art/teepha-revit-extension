@@ -1,0 +1,25 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# pyRevit runtime / cache artifacts
+*.pyrevit
+pyRevit_*
+*.dll
+*.pickle
+*.cache
+*.dat
+
+# Editor / temp artifacts
+*.tmp
+*.temp
+*.bak
+*.orig
+*~
+*.swp
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
