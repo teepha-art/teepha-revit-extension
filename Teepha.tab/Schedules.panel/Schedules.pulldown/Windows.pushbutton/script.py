@@ -38,15 +38,22 @@ def eid_value(element_id):
 
 
 def get_plan_level_for_sheet(sheet):
-    """Return the associated Level of the first floor plan placed on the sheet."""
+    """Return the Level of the floor plan on the sheet, preferring an F.F.L plan.
+
+    A setting-out sheet may carry both a C.F.L and an F.F.L plan. Schedules are
+    keyed to F.F.L, so an F.F.L plan wins. Falls back to the first floor plan's
+    level when no F.F.L plan is present (e.g. flat roof, which has no F.F.L pair)."""
+    plan_levels = []
     for vp_id in sheet.GetAllViewports():
-        vp = doc.GetElement(vp_id)
-        view = doc.GetElement(vp.ViewId)
+        view = doc.GetElement(doc.GetElement(vp_id).ViewId)
         if view is not None and view.ViewType == ViewType.FloorPlan:
             gen_level = getattr(view, "GenLevel", None)
             if gen_level:
-                return gen_level
-    return None
+                plan_levels.append(gen_level)
+    for lvl in plan_levels:
+        if "F.F.L" in lvl.Name:
+            return lvl
+    return plan_levels[0] if plan_levels else None
 
 
 def is_setting_out_sheet(sheet):
