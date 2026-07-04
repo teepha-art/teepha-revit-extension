@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Windows schedule builder for the Schedules pulldown."""
+"""Doors schedule builder for the Schedules pulldown."""
 
-__title__ = "Windows"
+__title__ = "Doors"
 __author__ = "Teepha"
-__doc__ = ("Create a Window schedule (Level, Mark, Width, Height, Count), grouped "
+__doc__ = ("Create a Door schedule (Level, Mark, Width, Height, Count), grouped "
            "and sorted by Mark, filtered to each selected sheet's level, and place "
            "it on that sheet.")
 
@@ -18,9 +18,9 @@ from Autodesk.Revit.DB import (
 doc = revit.doc
 output = script.get_output()
 
-# --- Category-specific config (Doors button will mirror this block only) --------
-CATEGORY = BuiltInCategory.OST_Windows
-NAME_PREFIX = "WINDOWS"
+# --- Category-specific config (mirrors the Windows button; only this block differs) -
+CATEGORY = BuiltInCategory.OST_Doors
+NAME_PREFIX = "DOORS"
 
 # BuiltInParameter ids for the columns, in the exact house-style order.
 PID_LEVEL = -1002062   # Level (instance)
@@ -79,7 +79,7 @@ def is_placed_on_sheet(schedule_id, sheet_id):
 
 
 def build_schedule(level, name):
-    """Create the window schedule filtered to *level*, house-style formatted."""
+    """Create the door schedule filtered to *level*, house-style formatted."""
     vs = ViewSchedule.CreateSchedule(doc, ElementId(CATEGORY))
     vs.Name = name
     sdef = vs.Definition
@@ -136,15 +136,15 @@ def place_schedule(schedule, sheet):
 
 def run():
     sheets = forms.select_sheets(
-        title="Select SETTING-OUT sheets for Window schedules",
-        button_name="Build window schedules",
+        title="Select SETTING-OUT sheets for Door schedules",
+        button_name="Build door schedules",
         filterfunc=is_setting_out_sheet)
     if not sheets:
         script.exit()
 
     created, skipped, notes = [], [], []
 
-    t = Transaction(doc, "Windows schedules per sheet")
+    t = Transaction(doc, "Door schedules per sheet")
     t.Start()
     try:
         for sheet in sheets:
@@ -179,16 +179,16 @@ def run():
             schedule = build_schedule(level, name)
             place_schedule(schedule, sheet)
 
-            win_count = len(FilteredElementCollector(doc, schedule.Id)
-                            .WhereElementIsNotElementType().ToElementIds())
-            tail = "" if win_count else "  (no windows on this level - empty schedule)"
-            created.append("%s -> '%s' (%d windows)%s" % (tag, name, win_count, tail))
+            door_count = len(FilteredElementCollector(doc, schedule.Id)
+                             .WhereElementIsNotElementType().ToElementIds())
+            tail = "" if door_count else "  (no doors on this level - empty schedule)"
+            created.append("%s -> '%s' (%d doors)%s" % (tag, name, door_count, tail))
         t.Commit()
     except Exception:
         t.RollBack()
         raise
 
-    output.print_md("### Window schedules")
+    output.print_md("### Door schedules")
     if created:
         output.print_md("**Created / placed:**")
         for line in created:

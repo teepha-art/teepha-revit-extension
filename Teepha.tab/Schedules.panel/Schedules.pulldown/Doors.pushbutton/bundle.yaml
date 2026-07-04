@@ -1,0 +1,6 @@
+title: Doors
+author: Teepha
+tooltip: >
+  Create a Door schedule (Level, Mark, Width, Height, Count) grouped and sorted
+  by Mark, filtered to each selected sheet's level, and place it on that sheet.
+  Pick one or more setting-out sheets when prompted.
