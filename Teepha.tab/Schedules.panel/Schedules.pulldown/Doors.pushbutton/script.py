@@ -188,19 +188,32 @@ def run():
         t.RollBack()
         raise
 
-    output.print_md("### Door schedules")
-    if created:
-        output.print_md("**Created / placed:**")
-        for line in created:
-            output.print_md("- " + line)
-    if skipped:
-        output.print_md("**Skipped:**")
-        for line in skipped:
-            output.print_md("- " + line)
-    if notes:
-        output.print_md("**Notes:**")
-        for line in notes:
-            output.print_md("- " + line)
+    report_results(created, skipped, notes)
+
+
+def report_results(created, skipped, notes):
+    """Quiet toast on a clean run; open the full output window only when there is
+    something to review (a skipped sheet or a note). Errors raise on their own."""
+    if skipped or notes:
+        output.print_md("### %s schedules" % NAME_PREFIX.title())
+        if created:
+            output.print_md("**Created / placed:**")
+            for line in created:
+                output.print_md("- " + line)
+        if skipped:
+            output.print_md("**Skipped:**")
+            for line in skipped:
+                output.print_md("- " + line)
+        if notes:
+            output.print_md("**Notes:**")
+            for line in notes:
+                output.print_md("- " + line)
+    else:
+        try:
+            forms.toast("Created / placed on %d sheet(s)." % len(created),
+                        title="%s schedules" % NAME_PREFIX.title())
+        except Exception:
+            output.print_md("%d schedule(s) created / placed." % len(created))
 
 
 run()
