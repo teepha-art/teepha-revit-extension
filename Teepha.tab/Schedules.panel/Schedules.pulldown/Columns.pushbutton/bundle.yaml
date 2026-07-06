@@ -1,0 +1,6 @@
+title: Columns
+author: Teepha
+tooltip: >
+  Create a Structural Column schedule (Mark, Base Level, Size, Count) grouped and
+  sorted by Mark, filtered to each selected sheet's plan level, and place it on that
+  sheet. Size reads from the column type name. Pick one or more structural sheets.
