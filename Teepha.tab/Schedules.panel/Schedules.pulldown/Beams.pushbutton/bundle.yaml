@@ -1,0 +1,6 @@
+title: Beams
+author: Teepha
+tooltip: >
+  Create a Structural Framing (beam) schedule (Mark, Type Mark, Reference Level, Count)
+  grouped and sorted by Mark, filtered to each selected sheet's plan level, and place it
+  on that sheet. Pick one or more structural sheets.
