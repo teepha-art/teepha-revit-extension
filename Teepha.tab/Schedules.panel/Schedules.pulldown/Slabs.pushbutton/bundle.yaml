@@ -1,0 +1,7 @@
+title: Slabs
+author: Teepha
+tooltip: >
+  Create a Floor (slab) schedule (Type, Default Thickness, Area, Level) grouped by
+  Type with Area summed per type, sorted by Type, filtered to each selected sheet's
+  plan level. Prompts for STR / ARC / Both (filters by NEO_STR_ / NEO_ARC_ type
+  prefix; Both creates two schedules). Pick one or more structural sheets.

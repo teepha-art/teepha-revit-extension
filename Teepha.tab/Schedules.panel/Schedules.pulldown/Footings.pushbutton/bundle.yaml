@@ -1,0 +1,7 @@
+title: Footings
+author: Teepha
+tooltip: >
+  Create a Structural Foundation schedule (Mark, Level, Type Mark, Count) listing ALL
+  footings - pad and strip (wall) footings together - grouped and sorted by Mark with
+  a grand total, and place it on the sheet(s) you pick. Not level-filtered; strip
+  footings have no level of their own so their Level column is blank.

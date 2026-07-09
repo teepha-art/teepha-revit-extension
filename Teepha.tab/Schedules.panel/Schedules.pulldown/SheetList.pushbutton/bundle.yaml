@@ -1,0 +1,6 @@
+title: Sheet List
+author: Teepha
+tooltip: >
+  Create a SHEET LIST (Sheet Number, Sheet Name, Sheet Group) sorted by Sheet Group
+  then Sheet Number, and place it on a sheet you pick (cover/index sheets without
+  plans). Sheets with 'Appears In Sheet List' unchecked are excluded automatically.
