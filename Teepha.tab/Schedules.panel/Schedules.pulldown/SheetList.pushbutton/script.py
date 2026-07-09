@@ -5,7 +5,9 @@ __title__ = "Sheet List"
 __author__ = "Teepha"
 __doc__ = ("Create a Sheet List (Sheet Number, Sheet Name, Sheet Group) sorted by "
            "Sheet Group then Sheet Number, and place it on a sheet you pick (e.g. "
-           "the drawing list / cover sheet). Respects 'Appears In Sheet List'.")
+           "the drawing list / cover sheet). Falls back to Sheet Number / Sheet "
+           "Name only, sorted by Sheet Number, if this project has no Sheet Group "
+           "parameter. Respects 'Appears In Sheet List'.")
 
 from pyrevit import revit, forms, script
 from Autodesk.Revit.DB import (
@@ -18,10 +20,14 @@ output = script.get_output()
 
 SCHEDULE_NAME = "SHEET LIST"
 
-# Parameter ids for the columns, in the exact order requested.
+# BuiltInParameter ids: stable across every project, so safe to hardcode.
 PID_SHEET_NUMBER = -1007401  # Sheet Number
 PID_SHEET_NAME = -1007400    # Sheet Name
-PID_SHEET_GROUP = 821590     # Sheet Group (project parameter)
+
+# "Sheet Group" is a project parameter - its ElementId is assigned per-document,
+# so it can't be hardcoded like the BuiltInParameters above. Looked up by name
+# at runtime instead (see find_sheet_group_field).
+SHEET_GROUP_NAME = "Sheet Group"
 
 # The target is a cover / index / drawing-list sheet: offer only sheets that carry
 # no plan view (floor plans or structural plans).
@@ -59,10 +65,24 @@ def is_placed_on_sheet(schedule_id, sheet_id):
     return False
 
 
+def find_sheet_group_field(sdef):
+    """Look up the 'Sheet Group' schedulable field by name rather than by
+    ElementId, since project parameter ids aren't stable across documents.
+    Returns None if this project has no such parameter on sheets."""
+    for sf in sdef.GetSchedulableFields():
+        if sf.GetName(doc).strip().lower() == SHEET_GROUP_NAME.lower():
+            return sf
+    return None
+
+
 def build_sheet_list(name):
-    """Create the sheet list (Sheet Number, Sheet Name, Sheet Group), itemized,
-    sorted by Sheet Group then Sheet Number. Revit natively excludes sheets whose
-    'Appears In Sheet List' is unticked."""
+    """Create the sheet list (Sheet Number, Sheet Name, plus Sheet Group when the
+    project has that parameter), itemized, sorted by Sheet Group then Sheet
+    Number (or just Sheet Number if there's no Sheet Group parameter here).
+    Revit natively excludes sheets whose 'Appears In Sheet List' is unticked.
+
+    Returns (schedule, has_group) - has_group is False when the Sheet Group
+    column/sort had to be skipped."""
     vs = ViewSchedule.CreateSheetList(doc)
     vs.Name = name
     sdef = vs.Definition
@@ -73,17 +93,20 @@ def build_sheet_list(name):
 
     f_num = sdef.AddField(by_pid[PID_SHEET_NUMBER])
     sdef.AddField(by_pid[PID_SHEET_NAME])
-    f_group = sdef.AddField(by_pid[PID_SHEET_GROUP])
 
-    # Sort: Sheet Group first (groups cluster), then Sheet Number. Group stays a
-    # plain repeated column - no header sections.
-    sdef.AddSortGroupField(
-        ScheduleSortGroupField(f_group.FieldId, ScheduleSortOrder.Ascending))
+    group_field = find_sheet_group_field(sdef)
+    has_group = group_field is not None
+    if has_group:
+        f_group = sdef.AddField(group_field)
+        # Sort: Sheet Group first (groups cluster), then Sheet Number. Group
+        # stays a plain repeated column - no header sections.
+        sdef.AddSortGroupField(
+            ScheduleSortGroupField(f_group.FieldId, ScheduleSortOrder.Ascending))
     sdef.AddSortGroupField(
         ScheduleSortGroupField(f_num.FieldId, ScheduleSortOrder.Ascending))
     sdef.IsItemized = True
     sdef.ShowGrandTotal = False
-    return vs
+    return vs, has_group
 
 
 def place_schedule(schedule, sheet):
@@ -116,8 +139,13 @@ def run():
     try:
         schedule = find_schedule_by_name(SCHEDULE_NAME)
         if schedule is None:
-            schedule = build_sheet_list(SCHEDULE_NAME)
+            schedule, has_group = build_sheet_list(SCHEDULE_NAME)
             created.append("created '%s'" % SCHEDULE_NAME)
+            if not has_group:
+                notes.append(
+                    "No '%s' parameter found on sheets in this project - schedule "
+                    "created with Sheet Number / Sheet Name only, sorted by Sheet "
+                    "Number." % SHEET_GROUP_NAME)
         else:
             notes.append("reused existing '%s'" % SCHEDULE_NAME)
 
