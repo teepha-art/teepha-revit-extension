@@ -188,6 +188,50 @@ def toast(msg):
         output.print_md(msg)
 
 
+# Confirmation dialog with the full BEFORE -> AFTER mapping embedded in a
+# scrollable list, so approval never depends on the separate output window
+# being readable (the WebBrowser-based output window can fail to paint before
+# a modal dialog blocks the UI thread).
+CONFIRM_XAML = (
+    '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" '
+    'xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" '
+    'ShowInTaskbar="False" Width="560" Height="560" MinWidth="460" MinHeight="360" '
+    'ResizeMode="CanResizeWithGrip" WindowStartupLocation="CenterScreen" '
+    'Title="CORRECT - confirm renumber">'
+    '<DockPanel Margin="12">'
+    '<TextBlock x:Name="header_tb" DockPanel.Dock="Top" TextWrapping="Wrap" '
+    'Margin="0,0,0,8"/>'
+    '<StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" '
+    'HorizontalAlignment="Right" Margin="0,10,0,0">'
+    '<Button x:Name="cancel_btn" Content="Cancel" Width="90" Height="28" '
+    'Margin="0,0,10,0" Click="cancel_clicked"/>'
+    '<Button x:Name="ok_btn" Content="Apply renumber" Width="130" Height="28" '
+    'Click="ok_clicked"/>'
+    '</StackPanel>'
+    '<TextBox x:Name="list_tb" IsReadOnly="True" FontFamily="Consolas" '
+    'FontSize="13" VerticalScrollBarVisibility="Auto" '
+    'HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>'
+    '</DockPanel></Window>'
+)
+
+
+class ConfirmWindow(forms.WPFWindow):
+    """Modal confirm dialog carrying its own scrollable mapping list."""
+
+    def __init__(self, header, lines):
+        forms.WPFWindow.__init__(self, CONFIRM_XAML, literal_string=True)
+        self.header_tb.Text = header
+        self.list_tb.Text = "\r\n".join(lines)
+        self.confirmed = False
+
+    def ok_clicked(self, sender, args):
+        self.confirmed = True
+        self.Close()
+
+    def cancel_clicked(self, sender, args):
+        self.Close()
+
+
 def run():
     sheets = get_sheets()
     if not sheets:
@@ -232,13 +276,21 @@ def run():
         forms.alert("Aborted - the correction would produce a duplicate sheet number "
                     "(%s). No changes made." % conflict, exitscript=True)
 
-    proceed = forms.alert(
-        "Found %d sheet(s) to renumber across %d group(s).\n"
-        "The full BEFORE -> AFTER mapping is in the output window - review it first.\n\n"
-        "Apply now? Sheet NAMES will not change - only numbers."
-        % (len(all_changes), len(chosen)),
-        title="CORRECT - confirm renumber",
-        options=["Apply renumber", "Cancel"]) == "Apply renumber"
+    lines = []
+    for r in all_results:
+        if not r["changes"]:
+            continue
+        lines.append("%s  (prefix %s)" % (r["group"], r["prefix"]))
+        for (s, old, new) in r["changes"]:
+            lines.append("    %s  ->  %s" % (old, new))
+        lines.append("")
+    confirm = ConfirmWindow(
+        "Found %d sheet(s) to renumber across %d group(s). Review the full "
+        "BEFORE -> AFTER mapping below. Sheet NAMES will not change - only "
+        "numbers." % (len(all_changes), len(chosen)),
+        lines)
+    confirm.ShowDialog()
+    proceed = confirm.confirmed
     if not proceed:
         output.print_md("---")
         output.print_md("**Result: cancelled by user. Nothing changed.**")
