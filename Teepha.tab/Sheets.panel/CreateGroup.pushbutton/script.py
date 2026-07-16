@@ -14,11 +14,15 @@ from Autodesk.Revit.DB.ExtensibleStorage import (
 )
 from System import Guid
 from System.Collections.Generic import List, IList
-from System.Windows import Thickness, GridLength, TextWrapping, FontStyles
+from System.Windows import (
+    Thickness, GridLength, TextWrapping, FontStyles, Point, DataObject,
+    DragDropEffects, DragDrop,
+)
 from System.Windows.Controls import (
     Expander, StackPanel, Grid, ColumnDefinition, RowDefinition, TextBlock,
     TextBox, ComboBox, ComboBoxItem, Orientation, DockPanel, Button, Dock,
 )
+from System.Windows.Input import MouseButtonState, Cursors
 
 __title__ = "Create Group"
 __author__ = "Teepha"
@@ -33,19 +37,25 @@ output = script.get_output()
 
 SHEET_GROUP_PARAM = "Sheet Group"
 
-# Standard five disciplines: (display label, default Sheet Group text). Matches
+# Standard disciplines: (display label, default Sheet Group text). Matches
 # the project's existing Sheet Group values so the pre-fill is correct out of
-# the box; the text field stays fully editable for a different naming scheme.
+# the box; the field stays fully editable for a different naming scheme.
 STANDARD_DISCIPLINES = [
     ("Architectural", "01-ARCHITECTURAL DRAWING AND DETAILS"),
     ("Structural", "02-STRUCTURAL DRAWINGS AND DETAILS"),
     ("Sewage & Drainage", "03-MECHANICAL - SEWAGE AND DRAINAGE"),
     ("Water Supply", "04-MECHANICAL - WATER SUPPLY"),
     ("Electrical", "05-MECHANICAL - ELECTRICAL"),
+    ("Commercial Plan", "06-COMMERCIAL PLANS"),
+    ("Fire Safety", "07-MECHANICAL - FIRE SAFETY"),
 ]
 
 # Same trailing-counter parsing convention as CORRECT: prefix + trailing digits.
 NUM_RE = re.compile(r"^(.*?)(\d+)$")
+
+# Leading discipline number in a Sheet Group value, e.g. "03-MECHANICAL..." ->
+# ("03", "-MECHANICAL..."). Used to renumber sections after a drag reorder.
+GROUP_PREFIX_RE = re.compile(r"^(\d+)(-.*)$")
 
 
 # --- Pattern memory (Extensible Storage) ------------------------------------
@@ -194,6 +204,33 @@ def compute_default_titleblocks(all_sheets, titleblock_types):
     return defaults, overall_default
 
 
+def get_open_reference_docs():
+    """Other real (non-family, non-linked) Revit documents open in this
+    session, for Copy From to pull sheet count and names from."""
+    others = []
+    for d in doc.Application.Documents:
+        if d.IsFamilyDocument:
+            continue
+        if getattr(d, "IsLinked", False):
+            continue
+        if d.Title == doc.Title:
+            continue
+        others.append(d)
+    return others
+
+
+def get_group_names_in_doc(target_doc):
+    """Distinct, non-empty Sheet Group values used in target_doc, sorted."""
+    names = set()
+    for s in FilteredElementCollector(target_doc).OfClass(ViewSheet):
+        if s.IsPlaceholder:
+            continue
+        g = sheet_group(s)
+        if g:
+            names.add(g)
+    return sorted(names)
+
+
 def parse_pattern(pattern):
     """(prefix, start_int, width) or None if the pattern has no trailing counter."""
     m = NUM_RE.match(pattern or "")
@@ -214,8 +251,17 @@ class Section(object):
         self.label = label
 
         self.expander = Expander()
+        header = DockPanel()
+
+        drag_handle = TextBlock(Text="⠿")
+        drag_handle.Margin = Thickness(0, 0, 8, 0)
+        drag_handle.Cursor = Cursors.SizeAll
+        drag_handle.ToolTip = "Drag to reorder"
+        drag_handle.PreviewMouseLeftButtonDown += self._drag_start
+        DockPanel.SetDock(drag_handle, Dock.Left)
+        header.Children.Add(drag_handle)
+
         if removable:
-            header = DockPanel()
             remove_btn = Button(Content="×")  # "x"
             remove_btn.Width = 22
             remove_btn.Height = 20
@@ -225,18 +271,16 @@ class Section(object):
             remove_btn.Click += self._remove_clicked
             DockPanel.SetDock(remove_btn, Dock.Right)
             header.Children.Add(remove_btn)
-            lbl = TextBlock(Text=label)
-            lbl.VerticalAlignment = remove_btn.VerticalAlignment
-            header.Children.Add(lbl)
-            self.expander.Header = header
-        else:
-            self.expander.Header = label
+
+        lbl = TextBlock(Text=label)
+        header.Children.Add(lbl)
+        self.expander.Header = header
         self.expander.IsExpanded = False
         self.expander.Margin = Thickness(0, 0, 0, 8)
         self.expander.Padding = Thickness(4)
 
         body = Grid()
-        for _ in range(5):
+        for _ in range(6):
             body.RowDefinitions.Add(RowDefinition(Height=GridLength.Auto))
         col_label = ColumnDefinition(Width=GridLength(130))
         col_input = ColumnDefinition()
@@ -254,7 +298,13 @@ class Section(object):
             Grid.SetColumn(control, 1)
             body.Children.Add(control)
 
-        self.group_tb = TextBox(Text=default_group)
+        # Editable combo: free text like a textbox, but once Copy From picks a
+        # reference document its dropdown fills with that document's actual
+        # Sheet Group values, so the group can be selected instead of retyped
+        # (avoids typos that only show up as a Copy From "no sheets found").
+        self.group_tb = ComboBox()
+        self.group_tb.IsEditable = True
+        self.group_tb.Text = default_group
         add_row(0, "Sheet Group", self.group_tb)
 
         record = load_pattern_record(default_group) if default_group else None
@@ -276,6 +326,15 @@ class Section(object):
             self.tb_combo.SelectedIndex = selected_index
         add_row(3, "Title Block", self.tb_combo)
 
+        self.reference_docs = get_open_reference_docs()
+        self.copyfrom_combo = ComboBox()
+        self.copyfrom_combo.Items.Add(ComboBoxItem(Content="<None - name sheets later>"))
+        for d in self.reference_docs:
+            self.copyfrom_combo.Items.Add(ComboBoxItem(Content=d.Title))
+        self.copyfrom_combo.SelectedIndex = 0
+        self.copyfrom_combo.SelectionChanged += self._copyfrom_changed
+        add_row(4, "Copy From", self.copyfrom_combo)
+
         note = TextBlock()
         note.TextWrapping = TextWrapping.Wrap
         note.FontStyle = FontStyles.Italic
@@ -285,7 +344,7 @@ class Section(object):
             note.Text = ("%d sheet(s) already generated with this pattern. Change "
                          "the number above to renumber them; add a Count to also "
                          "create more." % n_tracked)
-        Grid.SetRow(note, 4)
+        Grid.SetRow(note, 5)
         Grid.SetColumn(note, 1)
         body.Children.Add(note)
 
@@ -296,6 +355,25 @@ class Section(object):
         self.panel.Children.Remove(self.expander)
         if self.on_remove:
             self.on_remove(self)
+
+    def _drag_start(self, sender, args):
+        if args.LeftButton == MouseButtonState.Pressed:
+            DragDrop.DoDragDrop(self.expander, DataObject("TeephaSection", self),
+                               DragDropEffects.Move)
+
+    def _copyfrom_changed(self, sender, args):
+        using_copy_from = self.copyfrom_combo.SelectedIndex > 0
+        self.count_tb.IsEnabled = not using_copy_from
+        if using_copy_from:
+            self.count_tb.Text = ""
+            ref_doc = self.reference_docs[self.copyfrom_combo.SelectedIndex - 1]
+            current_text = self.group_tb.Text
+            self.group_tb.Items.Clear()
+            for g in get_group_names_in_doc(ref_doc):
+                self.group_tb.Items.Add(g)
+            self.group_tb.Text = current_text
+        else:
+            self.group_tb.Items.Clear()
 
     def read(self):
         """Validated dict, an error string, or None if out of scope (collapsed,
@@ -317,11 +395,27 @@ class Section(object):
                      "e.g. 'COR_P1_V2_AR-00'." % label)
         prefix, start, width = parsed
 
-        count = 0
-        if count_raw:
-            if not count_raw.isdigit():
-                return "[%s] Sheet Count must be a whole number (0 or more)." % label
-            count = int(count_raw)
+        copy_from_index = self.copyfrom_combo.SelectedIndex
+        using_copy_from = copy_from_index > 0
+        copy_names = None
+
+        if using_copy_from:
+            ref_doc = self.reference_docs[copy_from_index - 1]
+            ref_sheets = [s for s in FilteredElementCollector(ref_doc).OfClass(ViewSheet)
+                         if not s.IsPlaceholder]
+            matched = sorted((s for s in ref_sheets if sheet_group(s) == group),
+                             key=lambda s: s.SheetNumber)
+            if not matched:
+                return ("[%s] Copy From: no sheets found with Sheet Group '%s' "
+                         "in '%s'." % (label, group, ref_doc.Title))
+            count = len(matched)
+            copy_names = [s.Name for s in matched]
+        else:
+            count = 0
+            if count_raw:
+                if not count_raw.isdigit():
+                    return "[%s] Sheet Count must be a whole number (0 or more)." % label
+                count = int(count_raw)
 
         if self.tb_combo.SelectedIndex < 0:
             return "[%s] Pick a Title Block." % label
@@ -350,6 +444,7 @@ class Section(object):
             "group": group, "prefix": prefix, "start": start, "width": width,
             "count": count, "tb_id": tb_id, "label": label,
             "existing_record": existing_record, "is_edit": is_edit,
+            "copy_names": copy_names,
         }
 
 
@@ -369,6 +464,47 @@ class CreateGroupWindow(forms.WPFWindow):
             self.sections.append(
                 Section(self.SectionsPanel, label, default_group,
                         titleblock_items, default_tb))
+
+        self.SectionsPanel.AllowDrop = True
+        self.SectionsPanel.Drop += self._panel_drop
+
+    def _index_at_y(self, y):
+        """Insertion index for a drop at panel-local y, based on each section's
+        current vertical center."""
+        children = self.SectionsPanel.Children
+        for i in range(children.Count):
+            child = children[i]
+            top_left = child.TransformToVisual(self.SectionsPanel).Transform(Point(0, 0))
+            center_y = top_left.Y + child.ActualHeight / 2.0
+            if y < center_y:
+                return i
+        return children.Count
+
+    def _panel_drop(self, sender, args):
+        dragged = args.Data.GetData("TeephaSection")
+        if dragged is None or dragged not in self.sections:
+            return
+        y = args.GetPosition(self.SectionsPanel).Y
+        target_index = self._index_at_y(y)
+        self.SectionsPanel.Children.Remove(dragged.expander)
+        self.sections.remove(dragged)
+        target_index = min(target_index, self.SectionsPanel.Children.Count)
+        self.SectionsPanel.Children.Insert(target_index, dragged.expander)
+        self.sections.insert(target_index, dragged)
+        self._renumber_group_prefixes()
+
+    def _renumber_group_prefixes(self):
+        """After a reorder, rewrite each section's leading 'NN-' Sheet Group
+        number to match its new position, preserving digit width and whatever
+        follows the dash. Sections whose text doesn't start with digits+dash
+        (a custom naming scheme) are left untouched."""
+        for i, sec in enumerate(self.sections):
+            text = sec.group_tb.Text or ""
+            m = GROUP_PREFIX_RE.match(text)
+            if m:
+                width = len(m.group(1))
+                new_prefix = str(i + 1).zfill(width)
+                sec.group_tb.Text = new_prefix + m.group(2)
 
     def add_discipline(self, sender, args):
         self.sections.append(
@@ -463,6 +599,7 @@ def compute_operations(rows):
             "group": group, "label": label, "tb_id": tb_id,
             "prefix": prefix, "final_width": tw,
             "renumbers": renumbers, "new_numbers": new_numbers,
+            "new_names": row.get("copy_names"),  # parallel to new_numbers, or None
         })
     return ops
 
@@ -502,9 +639,13 @@ def build_preview_lines(ops):
                 lines.append("    %s  ->  %s" % (old, new))
                 total_renum += 1
         if op["new_numbers"]:
+            names = op.get("new_names")
             lines.append("  Creating %d new sheet(s):" % len(op["new_numbers"]))
-            for n in op["new_numbers"]:
-                lines.append("    %s" % n)
+            for idx, n in enumerate(op["new_numbers"]):
+                if names:
+                    lines.append("    %s   (name: '%s')" % (n, names[idx]))
+                else:
+                    lines.append("    %s" % n)
                 total_new += 1
         lines.append("")
     return lines, total_new, total_renum
@@ -540,12 +681,15 @@ def apply_all(ops):
         for (s, old, new) in all_renumbers:
             s.SheetNumber = new
 
-        # Phase 2: create new sheets.
+        # Phase 2: create new sheets, naming them from Copy From if supplied.
         for op in ops:
             op["created_sheets"] = []
-            for n in op["new_numbers"]:
+            names = op.get("new_names")
+            for idx, n in enumerate(op["new_numbers"]):
                 sheet = ViewSheet.Create(doc, op["tb_id"])
                 sheet.SheetNumber = n
+                if names:
+                    sheet.Name = names[idx]
                 p = sheet.LookupParameter(SHEET_GROUP_PARAM)
                 if p and not p.IsReadOnly:
                     p.Set(op["group"])
