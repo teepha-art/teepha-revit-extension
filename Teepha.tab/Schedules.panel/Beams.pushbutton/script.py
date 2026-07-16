@@ -4,15 +4,20 @@
 __title__ = "Beams"
 __author__ = "Teepha"
 __doc__ = ("Create a Structural Framing (beam) schedule (Mark, Type Mark, Reference "
-           "Level, Count), grouped and sorted by Mark, filtered to each selected "
-           "sheet's plan level, and place it on that sheet.")
+           "Level, Count), grouped and sorted by Mark. House convention: a beam "
+           "layout plan hosted at level X shows the beams that support the slab "
+           "ABOVE X, so the schedule filters to the next C.F.L level up from the "
+           "sheet's plan level - not the plan's own level. The schedule is named "
+           "after the plan's own level with a BEAM suffix (e.g. 'GROUND FLOOR "
+           "C.F.L BEAM'), except the lowest level's plan, which is always named "
+           "'PLINTH BEAM'.")
 
 from pyrevit import revit, forms, script
 from Autodesk.Revit.DB import (
     FilteredElementCollector, ViewSheet, ViewSchedule, ViewType, BuiltInCategory,
-    ElementId, Transaction, ScheduleFieldType, ScheduleSortGroupField, ScheduleSortOrder,
-    ScheduleFilter, ScheduleFilterType, ScheduleSheetInstance, ScheduleFieldDisplayType,
-    XYZ,
+    ElementId, Level, Transaction, ScheduleFieldType, ScheduleSortGroupField,
+    ScheduleSortOrder, ScheduleFilter, ScheduleFilterType, ScheduleSheetInstance,
+    ScheduleFieldDisplayType, XYZ,
 )
 
 doc = revit.doc
@@ -21,6 +26,7 @@ output = script.get_output()
 # --- Category-specific config -----------------------------------------------------
 CATEGORY = BuiltInCategory.OST_StructuralFraming
 NAME_PREFIX = "BEAMS"
+PLINTH_NAME = "PLINTH BEAM"
 
 # Beams sit on C.F.L levels and structural sheets carry C.F.L plans, so we read the
 # sheet's plan level as-is (NO F.F.L mapping, same as Columns).
@@ -56,6 +62,37 @@ def get_plan_level_for_sheet(sheet):
 def has_plan_level(sheet):
     """Only offer sheets that carry a plan we can resolve a level from."""
     return get_plan_level_for_sheet(sheet) is not None
+
+
+def get_cfl_levels_sorted():
+    """All C.F.L levels in this project, sorted by elevation (ascending). Only
+    C.F.L levels represent structural plan levels here - F.F.L (finish floor)
+    levels are a different concept and never plan-hosting levels for beams."""
+    levels = [l for l in FilteredElementCollector(doc).OfClass(Level)
+             if "C.F.L" in l.Name.upper()]
+    return sorted(levels, key=lambda l: l.Elevation)
+
+
+def get_next_level_up(plan_level, cfl_levels):
+    """The next C.F.L level above plan_level, or None if plan_level is already
+    the topmost (nothing above to reference - e.g. a roof plan)."""
+    for i, lvl in enumerate(cfl_levels):
+        if eid_value(lvl.Id) == eid_value(plan_level.Id):
+            return cfl_levels[i + 1] if i + 1 < len(cfl_levels) else None
+    return None
+
+
+def is_lowest_level(plan_level, cfl_levels):
+    return bool(cfl_levels) and eid_value(cfl_levels[0].Id) == eid_value(plan_level.Id)
+
+
+def schedule_name_for(plan_level, cfl_levels):
+    """PLINTH BEAM for the lowest level's plan (fixed, regardless of what that
+    level is actually called in this project); otherwise '<plan's own level>
+    BEAM', named after the plan itself, not the level it's filtered to."""
+    if is_lowest_level(plan_level, cfl_levels):
+        return PLINTH_NAME
+    return ("%s BEAM" % plan_level.Name).upper()
 
 
 def find_schedule_by_name(name):
@@ -131,18 +168,26 @@ def run():
         script.exit()
 
     created, skipped, notes = [], [], []
+    cfl_levels = get_cfl_levels_sorted()
 
     t = Transaction(doc, "Beam schedules per sheet")
     t.Start()
     try:
         for sheet in sheets:
             tag = "%s - %s" % (sheet.SheetNumber, sheet.Name)
-            level = get_plan_level_for_sheet(sheet)
-            if level is None:
+            plan_level = get_plan_level_for_sheet(sheet)
+            if plan_level is None:
                 skipped.append("%s -> no plan / no level found" % tag)
                 continue
 
-            name = "%s - %s" % (NAME_PREFIX, level.Name)
+            level = get_next_level_up(plan_level, cfl_levels)
+            if level is None:
+                skipped.append(
+                    "%s -> '%s' is the topmost C.F.L level - no level above it "
+                    "to reference" % (tag, plan_level.Name))
+                continue
+
+            name = schedule_name_for(plan_level, cfl_levels)
             existing = find_schedule_by_name(name)
             if existing is not None:
                 choice = forms.alert(
