@@ -1,0 +1,7 @@
+title: CORRECT
+author: Teepha
+tooltip: >
+  Audit and fix sheet numbering within a Sheet Group (or all groups): closes gaps,
+  normalises padding (e.g. AR-002 -> AR-02) and resolves duplicate numbers. Shows the
+  full BEFORE -> AFTER mapping for your approval before changing anything, applies the
+  renumber collision-safely, and never changes Sheet Names - only Sheet Numbers.

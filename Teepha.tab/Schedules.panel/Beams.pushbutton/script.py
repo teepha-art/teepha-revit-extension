@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Structural column schedule builder for the Schedules pulldown."""
+"""Structural beam schedule builder for the Schedules pulldown."""
 
-__title__ = "Columns"
+__title__ = "Beams"
 __author__ = "Teepha"
-__doc__ = ("Create a Structural Column schedule (Mark, Base Level, Size, Count), "
-           "grouped and sorted by Mark, filtered to each selected sheet's plan level, "
-           "and place it on that sheet.")
+__doc__ = ("Create a Structural Framing (beam) schedule (Mark, Type Mark, Reference "
+           "Level, Count), grouped and sorted by Mark. House convention: you stand on "
+           "floor X and look UP at the slab and beams above, so you pick the plan of "
+           "the level ABOVE X. The schedule filters to that plan's own Reference Level "
+           "but is named after the level BELOW the plan (e.g. the 1st floor plan gives "
+           "'GROUND FLOOR C.F.L BEAM'). The lowest structural level's plan is the "
+           "exception: it shows its own level's beams and is always named 'PLINTH "
+           "BEAM'. Works for any number of levels.")
 
 from pyrevit import revit, forms, script
 from Autodesk.Revit.DB import (
     FilteredElementCollector, ViewSheet, ViewSchedule, ViewType, BuiltInCategory,
-    ElementId, Transaction, ScheduleFieldType, ScheduleSortGroupField,
+    ElementId, Level, Transaction, ScheduleFieldType, ScheduleSortGroupField,
     ScheduleSortOrder, ScheduleFilter, ScheduleFilterType, ScheduleSheetInstance,
     ScheduleFieldDisplayType, XYZ,
 )
@@ -19,17 +24,22 @@ doc = revit.doc
 output = script.get_output()
 
 # --- Category-specific config -----------------------------------------------------
-CATEGORY = BuiltInCategory.OST_StructuralColumns
-NAME_PREFIX = "COLUMNS"
+CATEGORY = BuiltInCategory.OST_StructuralFraming
+NAME_PREFIX = "BEAMS"
+PLINTH_NAME = "PLINTH BEAM"
 
-# Structural columns sit on C.F.L levels and structural sheets carry C.F.L plans, so
-# we read the sheet's plan level as-is (NO F.F.L mapping, unlike Windows/Doors).
+# Level-name tag that marks structural (plan-hosting) levels; F.F.L finish-floor levels
+# don't carry it. If a project has no level with this tag, all levels are used instead.
+CFL_TOKEN = "C.F.L"
+
+# Beams sit on C.F.L levels and structural sheets carry C.F.L plans, so we read the
+# sheet's plan level as-is (NO F.F.L mapping, same as Columns).
 PLAN_VIEW_TYPES = (ViewType.FloorPlan, ViewType.EngineeringPlan)
 
-# BuiltInParameter ids for the columns, in the exact house-style order.
-PID_MARK = -1001203        # Mark (instance)
-PID_BASE_LEVEL = -1002063  # Base Level (instance)
-PID_TYPE = -1002050        # Type (instance) -> used as "Size" (the type name)
+# BuiltInParameter ids for the columns, in the exact order requested.
+PID_MARK = -1001203       # Mark (instance)
+PID_TYPE_MARK = -1001405  # Type Mark (type)
+PID_REF_LEVEL = -1001383  # Reference Level (instance)
 
 
 def eid_value(element_id):
@@ -43,8 +53,7 @@ def eid_value(element_id):
 def get_plan_level_for_sheet(sheet):
     """Return the level of the first plan on the sheet, read as-is (no F.F.L mapping).
 
-    Accepts floor plans and structural (engineering) plans, since column layouts are
-    usually structural plans."""
+    Accepts floor plans and structural (engineering) plans."""
     for vp_id in sheet.GetAllViewports():
         view = doc.GetElement(doc.GetElement(vp_id).ViewId)
         if view is not None and view.ViewType in PLAN_VIEW_TYPES:
@@ -57,6 +66,46 @@ def get_plan_level_for_sheet(sheet):
 def has_plan_level(sheet):
     """Only offer sheets that carry a plan we can resolve a level from."""
     return get_plan_level_for_sheet(sheet) is not None
+
+
+def get_cfl_levels_sorted():
+    """Structural levels of this project (name contains CFL_TOKEN), sorted by
+    elevation ascending. F.F.L (finish floor) levels are a different concept and never
+    plan-hosting levels for beams. Falls back to every level if none carry the tag."""
+    all_levels = list(FilteredElementCollector(doc).OfClass(Level))
+    levels = [l for l in all_levels if CFL_TOKEN in l.Name.upper()] or all_levels
+    return sorted(levels, key=lambda l: l.Elevation)
+
+
+def index_of(level, levels):
+    for i, lvl in enumerate(levels):
+        if eid_value(lvl.Id) == eid_value(level.Id):
+            return i
+    return -1
+
+
+def get_level_below(plan_level, cfl_levels):
+    """The structural level directly below plan_level, or None if plan_level is the
+    lowest one (or isn't a structural level at all)."""
+    i = index_of(plan_level, cfl_levels)
+    return cfl_levels[i - 1] if i > 0 else None
+
+
+def is_lowest_level(plan_level, cfl_levels):
+    return bool(cfl_levels) and index_of(plan_level, cfl_levels) == 0
+
+
+def schedule_name_for(plan_level, cfl_levels):
+    """PLINTH BEAM for the lowest structural level's plan (fixed, whatever that level
+    is called in this project). Otherwise '<level below the plan> BEAM': you stand on
+    that floor looking up at the beams the plan's level carries. None if the plan's
+    level isn't in the structural level list."""
+    if is_lowest_level(plan_level, cfl_levels):
+        return PLINTH_NAME
+    below = get_level_below(plan_level, cfl_levels)
+    if below is None:
+        return None
+    return ("%s BEAM" % below.Name).upper()
 
 
 def find_schedule_by_name(name):
@@ -74,7 +123,9 @@ def is_placed_on_sheet(schedule_id, sheet_id):
 
 
 def build_schedule(level, name):
-    """Create the column schedule filtered to *level* (Base Level), house-style."""
+    """Create the beam schedule (Mark, Type Mark, Reference Level, Count) filtered to
+    *level* (Reference Level), grouped and sorted by Mark, with a grand total that
+    sums the Count column."""
     vs = ViewSchedule.CreateSchedule(doc, ElementId(CATEGORY))
     vs.Name = name
     sdef = vs.Definition
@@ -87,13 +138,12 @@ def build_schedule(level, name):
             count_field = sf
 
     f_mark = sdef.AddField(by_pid[PID_MARK])
-    f_base = sdef.AddField(by_pid[PID_BASE_LEVEL])
-    f_size = sdef.AddField(by_pid[PID_TYPE])
-    f_size.ColumnHeading = "Size"          # the type name carries the size
+    sdef.AddField(by_pid[PID_TYPE_MARK])
+    f_ref = sdef.AddField(by_pid[PID_REF_LEVEL])
     f_count = sdef.AddField(count_field)
 
-    # Filter to this base level only.
-    sdef.AddFilter(ScheduleFilter(f_base.FieldId, ScheduleFilterType.Equal, level.Id))
+    # Filter to this reference level only.
+    sdef.AddFilter(ScheduleFilter(f_ref.FieldId, ScheduleFilterType.Equal, level.Id))
 
     # Group + sort by Mark, collapse identical marks, grand total row.
     sdef.AddSortGroupField(
@@ -124,25 +174,33 @@ def place_schedule(schedule, sheet):
 
 def run():
     sheets = forms.select_sheets(
-        title="Select sheets for Column schedules",
-        button_name="Build column schedules",
+        title="Select sheets for Beam schedules",
+        button_name="Build beam schedules",
         filterfunc=has_plan_level)
     if not sheets:
         script.exit()
 
     created, skipped, notes = [], [], []
+    cfl_levels = get_cfl_levels_sorted()
 
-    t = Transaction(doc, "Column schedules per sheet")
+    t = Transaction(doc, "Beam schedules per sheet")
     t.Start()
     try:
         for sheet in sheets:
             tag = "%s - %s" % (sheet.SheetNumber, sheet.Name)
-            level = get_plan_level_for_sheet(sheet)
-            if level is None:
+            plan_level = get_plan_level_for_sheet(sheet)
+            if plan_level is None:
                 skipped.append("%s -> no plan / no level found" % tag)
                 continue
 
-            name = "%s - %s" % (NAME_PREFIX, level.Name)
+            # The plan's own level carries the beams shown; only the NAME looks down.
+            level = plan_level
+            name = schedule_name_for(plan_level, cfl_levels)
+            if name is None:
+                skipped.append(
+                    "%s -> '%s' is not a structural (%s) level - cannot name the "
+                    "schedule" % (tag, plan_level.Name, CFL_TOKEN))
+                continue
             existing = find_schedule_by_name(name)
             if existing is not None:
                 choice = forms.alert(
@@ -167,10 +225,10 @@ def run():
             schedule = build_schedule(level, name)
             place_schedule(schedule, sheet)
 
-            col_count = len(FilteredElementCollector(doc, schedule.Id)
-                            .WhereElementIsNotElementType().ToElementIds())
-            tail = "" if col_count else "  (no columns based at this level - empty schedule)"
-            created.append("%s -> '%s' (%d columns)%s" % (tag, name, col_count, tail))
+            beam_count = len(FilteredElementCollector(doc, schedule.Id)
+                             .WhereElementIsNotElementType().ToElementIds())
+            tail = "" if beam_count else "  (no beams on this level - empty schedule)"
+            created.append("%s -> '%s' (%d beams)%s" % (tag, name, beam_count, tail))
         t.Commit()
     except Exception:
         t.RollBack()

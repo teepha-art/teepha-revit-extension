@@ -1,0 +1,6 @@
+title: Create Group
+author: Teepha
+tooltip: >
+  Generate a batch of sheets for one or more disciplines in one pass: pick a
+  Sheet Group, a sample sheet-number pattern (e.g. "COR_P1_V2_AR-00"), a count,
+  and a title block, then review the full list before anything is created.

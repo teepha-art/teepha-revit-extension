@@ -1,0 +1,11 @@
+title: Schedules
+layout:
+  - Windows
+  - Doors
+  - '-----'
+  - Columns
+  - Beams
+  - Footings
+  - Slabs
+  - '-----'
+  - SheetList
