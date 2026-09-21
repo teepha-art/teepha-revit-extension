@@ -4,13 +4,13 @@
 __title__ = "Beams"
 __author__ = "Teepha"
 __doc__ = ("Create a Structural Framing (beam) schedule (Mark, Type Mark, Reference "
-           "Level, Count), grouped and sorted by Mark. House convention: a beam "
-           "layout plan hosted at level X shows the beams that support the slab "
-           "ABOVE X, so the schedule filters to the next C.F.L level up from the "
-           "sheet's plan level - not the plan's own level. The schedule is named "
-           "after the plan's own level with a BEAM suffix (e.g. 'GROUND FLOOR "
-           "C.F.L BEAM'), except the lowest level's plan, which is always named "
-           "'PLINTH BEAM'.")
+           "Level, Count), grouped and sorted by Mark. House convention: you stand on "
+           "floor X and look UP at the slab and beams above, so you pick the plan of "
+           "the level ABOVE X. The schedule filters to that plan's own Reference Level "
+           "but is named after the level BELOW the plan (e.g. the 1st floor plan gives "
+           "'GROUND FLOOR C.F.L BEAM'). The lowest structural level's plan is the "
+           "exception: it shows its own level's beams and is always named 'PLINTH "
+           "BEAM'. Works for any number of levels.")
 
 from pyrevit import revit, forms, script
 from Autodesk.Revit.DB import (
@@ -27,6 +27,10 @@ output = script.get_output()
 CATEGORY = BuiltInCategory.OST_StructuralFraming
 NAME_PREFIX = "BEAMS"
 PLINTH_NAME = "PLINTH BEAM"
+
+# Level-name tag that marks structural (plan-hosting) levels; F.F.L finish-floor levels
+# don't carry it. If a project has no level with this tag, all levels are used instead.
+CFL_TOKEN = "C.F.L"
 
 # Beams sit on C.F.L levels and structural sheets carry C.F.L plans, so we read the
 # sheet's plan level as-is (NO F.F.L mapping, same as Columns).
@@ -65,34 +69,43 @@ def has_plan_level(sheet):
 
 
 def get_cfl_levels_sorted():
-    """All C.F.L levels in this project, sorted by elevation (ascending). Only
-    C.F.L levels represent structural plan levels here - F.F.L (finish floor)
-    levels are a different concept and never plan-hosting levels for beams."""
-    levels = [l for l in FilteredElementCollector(doc).OfClass(Level)
-             if "C.F.L" in l.Name.upper()]
+    """Structural levels of this project (name contains CFL_TOKEN), sorted by
+    elevation ascending. F.F.L (finish floor) levels are a different concept and never
+    plan-hosting levels for beams. Falls back to every level if none carry the tag."""
+    all_levels = list(FilteredElementCollector(doc).OfClass(Level))
+    levels = [l for l in all_levels if CFL_TOKEN in l.Name.upper()] or all_levels
     return sorted(levels, key=lambda l: l.Elevation)
 
 
-def get_next_level_up(plan_level, cfl_levels):
-    """The next C.F.L level above plan_level, or None if plan_level is already
-    the topmost (nothing above to reference - e.g. a roof plan)."""
-    for i, lvl in enumerate(cfl_levels):
-        if eid_value(lvl.Id) == eid_value(plan_level.Id):
-            return cfl_levels[i + 1] if i + 1 < len(cfl_levels) else None
-    return None
+def index_of(level, levels):
+    for i, lvl in enumerate(levels):
+        if eid_value(lvl.Id) == eid_value(level.Id):
+            return i
+    return -1
+
+
+def get_level_below(plan_level, cfl_levels):
+    """The structural level directly below plan_level, or None if plan_level is the
+    lowest one (or isn't a structural level at all)."""
+    i = index_of(plan_level, cfl_levels)
+    return cfl_levels[i - 1] if i > 0 else None
 
 
 def is_lowest_level(plan_level, cfl_levels):
-    return bool(cfl_levels) and eid_value(cfl_levels[0].Id) == eid_value(plan_level.Id)
+    return bool(cfl_levels) and index_of(plan_level, cfl_levels) == 0
 
 
 def schedule_name_for(plan_level, cfl_levels):
-    """PLINTH BEAM for the lowest level's plan (fixed, regardless of what that
-    level is actually called in this project); otherwise '<plan's own level>
-    BEAM', named after the plan itself, not the level it's filtered to."""
+    """PLINTH BEAM for the lowest structural level's plan (fixed, whatever that level
+    is called in this project). Otherwise '<level below the plan> BEAM': you stand on
+    that floor looking up at the beams the plan's level carries. None if the plan's
+    level isn't in the structural level list."""
     if is_lowest_level(plan_level, cfl_levels):
         return PLINTH_NAME
-    return ("%s BEAM" % plan_level.Name).upper()
+    below = get_level_below(plan_level, cfl_levels)
+    if below is None:
+        return None
+    return ("%s BEAM" % below.Name).upper()
 
 
 def find_schedule_by_name(name):
@@ -180,14 +193,14 @@ def run():
                 skipped.append("%s -> no plan / no level found" % tag)
                 continue
 
-            level = get_next_level_up(plan_level, cfl_levels)
-            if level is None:
-                skipped.append(
-                    "%s -> '%s' is the topmost C.F.L level - no level above it "
-                    "to reference" % (tag, plan_level.Name))
-                continue
-
+            # The plan's own level carries the beams shown; only the NAME looks down.
+            level = plan_level
             name = schedule_name_for(plan_level, cfl_levels)
+            if name is None:
+                skipped.append(
+                    "%s -> '%s' is not a structural (%s) level - cannot name the "
+                    "schedule" % (tag, plan_level.Name, CFL_TOKEN))
+                continue
             existing = find_schedule_by_name(name)
             if existing is not None:
                 choice = forms.alert(

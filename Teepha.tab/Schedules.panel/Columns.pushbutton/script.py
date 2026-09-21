@@ -4,13 +4,16 @@
 __title__ = "Columns"
 __author__ = "Teepha"
 __doc__ = ("Create a Structural Column schedule (Mark, Base Level, Size, Count), "
-           "grouped and sorted by Mark, filtered to each selected sheet's plan level, "
-           "and place it on that sheet.")
+           "grouped and sorted by Mark, and place it on each selected sheet. Asks "
+           "whether the sheets show columns STARTING at the plan level (setting-out "
+           "sheets) or columns BELOW it (layout sheets, e.g. 'ground floor columns, "
+           "1st floor slab'). The schedule is filtered and named by the Base Level "
+           "it shows. Works for any number of levels.")
 
 from pyrevit import revit, forms, script
 from Autodesk.Revit.DB import (
     FilteredElementCollector, ViewSheet, ViewSchedule, ViewType, BuiltInCategory,
-    ElementId, Transaction, ScheduleFieldType, ScheduleSortGroupField,
+    ElementId, BuiltInParameter, Transaction, ScheduleFieldType, ScheduleSortGroupField,
     ScheduleSortOrder, ScheduleFilter, ScheduleFilterType, ScheduleSheetInstance,
     ScheduleFieldDisplayType, XYZ,
 )
@@ -22,14 +25,17 @@ output = script.get_output()
 CATEGORY = BuiltInCategory.OST_StructuralColumns
 NAME_PREFIX = "COLUMNS"
 
-# Structural columns sit on C.F.L levels and structural sheets carry C.F.L plans, so
-# we read the sheet's plan level as-is (NO F.F.L mapping, unlike Windows/Doors).
+# Structural sheets carry structural plans, so we read the sheet's plan level as-is
+# (NO F.F.L mapping, unlike Windows/Doors).
 PLAN_VIEW_TYPES = (ViewType.FloorPlan, ViewType.EngineeringPlan)
 
 # BuiltInParameter ids for the columns, in the exact house-style order.
 PID_MARK = -1001203        # Mark (instance)
 PID_BASE_LEVEL = -1002063  # Base Level (instance)
 PID_TYPE = -1002050        # Type (instance) -> used as "Size" (the type name)
+
+MODE_STARTING = "Columns starting at this level"
+MODE_BELOW = "Columns below this level"
 
 
 def eid_value(element_id):
@@ -57,6 +63,30 @@ def get_plan_level_for_sheet(sheet):
 def has_plan_level(sheet):
     """Only offer sheets that carry a plan we can resolve a level from."""
     return get_plan_level_for_sheet(sheet) is not None
+
+
+def get_column_base_levels():
+    """Levels that actually have structural columns based on them, sorted by elevation
+    ascending. Data-driven, so it needs no level-name convention and works for any
+    number of floors."""
+    seen = {}
+    for col in (FilteredElementCollector(doc)
+                .OfCategory(CATEGORY).WhereElementIsNotElementType()):
+        p = col.get_Parameter(BuiltInParameter.SCHEDULE_BASE_LEVEL_PARAM)
+        lvl = doc.GetElement(p.AsElementId()) if p is not None else None
+        if lvl is not None:
+            seen[eid_value(lvl.Id)] = lvl
+    return sorted(seen.values(), key=lambda l: l.Elevation)
+
+
+def resolve_base_level(plan_level, mode, base_levels):
+    """The Base Level the schedule should show for a sheet whose plan is at
+    *plan_level*. STARTING -> the plan's own level. BELOW -> the nearest level under
+    the plan that has columns based on it (None if there isn't one)."""
+    if mode == MODE_STARTING:
+        return plan_level
+    below = [l for l in base_levels if l.Elevation < plan_level.Elevation - 1e-6]
+    return below[-1] if below else None
 
 
 def find_schedule_by_name(name):
@@ -123,6 +153,12 @@ def place_schedule(schedule, sheet):
 
 
 def run():
+    mode = forms.alert(
+        "Which columns do these sheets show?",
+        options=[MODE_STARTING, MODE_BELOW])
+    if not mode:
+        script.exit()
+
     sheets = forms.select_sheets(
         title="Select sheets for Column schedules",
         button_name="Build column schedules",
@@ -131,17 +167,25 @@ def run():
         script.exit()
 
     created, skipped, notes = [], [], []
+    base_levels = get_column_base_levels() if mode == MODE_BELOW else []
 
     t = Transaction(doc, "Column schedules per sheet")
     t.Start()
     try:
         for sheet in sheets:
             tag = "%s - %s" % (sheet.SheetNumber, sheet.Name)
-            level = get_plan_level_for_sheet(sheet)
-            if level is None:
+            plan_level = get_plan_level_for_sheet(sheet)
+            if plan_level is None:
                 skipped.append("%s -> no plan / no level found" % tag)
                 continue
 
+            level = resolve_base_level(plan_level, mode, base_levels)
+            if level is None:
+                skipped.append(
+                    "%s -> no columns based below '%s'" % (tag, plan_level.Name))
+                continue
+
+            # Named after the Base Level actually filtered, so name always matches content.
             name = "%s - %s" % (NAME_PREFIX, level.Name)
             existing = find_schedule_by_name(name)
             if existing is not None:
